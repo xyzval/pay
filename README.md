@@ -1,80 +1,76 @@
-# Bot Telegram QRIS Payment Gateway
+# QRIS Payment Gateway
 
-Bot Telegram untuk menerima pembayaran otomatis via QRIS Mitra Bukalapak.  
-Bot mengkonversi QRIS statis menjadi QRIS dinamis (dengan nominal unik) sehingga setiap pembayaran bisa diidentifikasi secara otomatis.
+Payment Gateway QRIS untuk menerima pembayaran otomatis via QRIS Mitra Bukalapak.  
+Dilengkapi REST API + API Key system agar bisa digunakan oleh bot/website lain sebagai payment gateway.
 
-## Cara Kerja
+## Arsitektur
 
 ```
-User ketik /bayar 50000
-       │
-       ▼
-Bot generate nominal unik (misal: 50.347)
-       │
-       ▼
-QRIS statis dikonversi ke QRIS dinamis (dengan nominal 50.347)
-       │
-       ▼
-Bot kirim gambar QR ke user
-       │
-       ▼
-User scan & bayar TEPAT Rp 50.347
-       │
-       ▼
-Admin cek mutasi → /confirm 50347
-       │
-       ▼
-Bot notif ke user: "Pembayaran Berhasil!"
+┌────────────────────────────────────────────────────────────┐
+│  PAYMENT GATEWAY (Server Anda)                             │
+│                                                            │
+│  ┌──────────────┐     ┌──────────────┐                    │
+│  │ Telegram Bot │     │  REST API    │                    │
+│  │  (bot.py)    │     │ (api_server) │                    │
+│  │              │     │  Port 8000   │                    │
+│  └──────┬───────┘     └──────┬───────┘                    │
+│         │                    │                             │
+│         ▼                    ▼                             │
+│  ┌─────────────────────────────────────┐                  │
+│  │       Payment Manager               │                  │
+│  │  + QRIS Converter (statis→dinamis)  │                  │
+│  │  + Merchant Manager (API keys)      │                  │
+│  │  + Webhook Sender                   │                  │
+│  │  + SQLite Database                  │                  │
+│  └─────────────────────────────────────┘                  │
+└────────────────────────────────────────────────────────────┘
+         │                    │
+         ▼                    ▼
+  ┌────────────┐    ┌─────────────────┐
+  │ Direct Pay │    │ Merchant Bots   │
+  │ via Bot    │    │ via API Key     │
+  └────────────┘    └─────────────────┘
 ```
 
 ## Fitur
 
-- Konversi QRIS statis ke dinamis (dengan nominal)
-- Nominal unik per transaksi untuk identifikasi pembayaran
-- Inline keyboard untuk pilih nominal
-- Auto-expire transaksi (default 30 menit)
+### Payment Gateway
+- REST API dengan autentikasi API Key
+- Multi-merchant support
+- Fee system (persentase + fixed)
+- Webhook callback ke merchant (HMAC-SHA256 signed)
+- QRIS dinamis otomatis (dari QRIS statis Mitra Bukalapak)
+- Nominal unik per transaksi
+- Auto-expire transaksi
+- API documentation (Swagger UI di /docs)
+
+### Telegram Bot
+- Pembayaran langsung via bot (/bayar)
+- Admin: konfirmasi manual, statistik
+- Admin: merchant management (add, revoke, deactivate)
 - Notifikasi otomatis ke buyer & admin
-- Riwayat transaksi per user
-- Database SQLite (ringan, tanpa setup server)
-- Admin panel: konfirmasi manual, statistik, lihat pending
 
-## Prasyarat
-
-- Python 3.9+
-- Akun Telegram Bot (dari @BotFather)
-- QRIS Mitra Bukalapak (data string dari QR Code)
-
-## Instalasi
-
-### 1. Clone / Download Project
+## Quick Start
 
 ```bash
-cd qris-telegram-bot
-```
+# 1. Clone repo
+git clone https://github.com/xyzval/pay.git
+cd pay
 
-### 2. Buat Virtual Environment
-
-```bash
-python3 -m venv venv
-source venv/bin/activate  # Linux/Mac
-# atau
-venv\Scripts\activate     # Windows
-```
-
-### 3. Install Dependencies
-
-```bash
+# 2. Install dependencies
 pip install -r requirements.txt
-```
 
-### 4. Konfigurasi .env
-
-```bash
+# 3. Setup konfigurasi
 cp .env.example .env
-nano .env  # edit sesuai data Anda
+# Edit .env → isi BOT_TOKEN, ADMIN_IDS, QRIS_STATIC
+
+# 4. Jalankan (Bot + API berjalan bersamaan)
+python bot.py
 ```
 
-Isi file `.env`:
+Bot Telegram dan API Server (port 8000) langsung jalan bersamaan.
+
+## Konfigurasi (.env)
 
 | Variable | Keterangan |
 |----------|-----------|
@@ -82,117 +78,193 @@ Isi file `.env`:
 | `ADMIN_IDS` | ID Telegram admin (pisah koma) |
 | `QRIS_STATIC` | Data string QRIS Mitra Bukalapak |
 | `EXPIRY_MINUTES` | Waktu expired pembayaran (default: 30) |
-| `CHECK_INTERVAL` | Interval cek mutasi dalam detik (default: 15) |
+| `CHECK_INTERVAL` | Interval cek mutasi (default: 15 detik) |
+| `API_PORT` | Port REST API (default: 8000) |
 
-### 5. Jalankan Bot
+## API Documentation
 
-```bash
-python bot.py
+Setelah bot jalan, buka Swagger UI: `http://SERVER_IP:8000/docs`
+
+### Endpoints
+
+| Method | Endpoint | Keterangan |
+|--------|----------|-----------|
+| POST | `/api/v1/payment/create` | Buat pembayaran baru |
+| GET | `/api/v1/payment/status/{tx_id}` | Cek status pembayaran |
+| POST | `/api/v1/payment/cancel/{tx_id}` | Batalkan pembayaran |
+| GET | `/api/v1/merchant/balance` | Lihat saldo & statistik |
+| GET | `/api/v1/merchant/transactions` | Riwayat transaksi |
+| GET | `/health` | Health check |
+
+### Autentikasi
+
+Semua endpoint memerlukan header:
+```
+Authorization: Bearer PAY-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-## Cara Mendapatkan Data QRIS
+### Contoh: Buat Pembayaran
 
-1. Buka aplikasi **Mitra Bukalapak**
-2. Masuk ke menu **QRIS / Terima Pembayaran**
-3. Screenshot QR Code yang ditampilkan
-4. Decode QR menggunakan salah satu cara:
-   - Website: https://webqr.com atau https://zxing.org/w/decode.jspx
-   - Aplikasi: QR Scanner yang bisa copy text
-5. Hasilnya berupa string panjang dimulai dengan `0002010101...`
-6. Copy string tersebut ke `QRIS_STATIC` di file `.env`
+```bash
+curl -X POST http://localhost:8000/api/v1/payment/create \
+  -H "Authorization: Bearer PAY-your-api-key-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "amount": 50000,
+    "product_name": "Pulsa XL 50rb",
+    "callback_url": "https://yourbot.com/webhook",
+    "metadata": "{\"order_id\": \"ORD-123\"}"
+  }'
+```
 
-## Cara Mendapatkan Bot Token
+Response:
+```json
+{
+  "success": true,
+  "data": {
+    "tx_id": "TX1234567890123",
+    "amount": 50347,
+    "base_amount": 50000,
+    "fee_amount": 503,
+    "net_amount": 49844,
+    "qris_string": "000201010211...",
+    "qr_image_base64": "iVBORw0KGgo...",
+    "status": "pending",
+    "expires_at": "2025-01-01T12:30:00"
+  }
+}
+```
 
-1. Buka Telegram, cari **@BotFather**
-2. Kirim `/newbot`
-3. Ikuti instruksi (nama bot, username bot)
-4. Copy token yang diberikan ke `BOT_TOKEN` di `.env`
+### Contoh: Cek Status
 
-## Cara Mendapatkan User ID (Admin)
+```bash
+curl http://localhost:8000/api/v1/payment/status/TX1234567890123 \
+  -H "Authorization: Bearer PAY-your-api-key-here"
+```
 
-1. Buka Telegram, cari **@userinfobot**
-2. Kirim `/start`
-3. Bot akan membalas ID Anda
-4. Masukkan ID tersebut ke `ADMIN_IDS` di `.env`
+### Webhook Callback
 
-## Commands
+Saat pembayaran dikonfirmasi, gateway mengirim POST ke webhook URL:
 
-### User Commands
+```json
+{
+  "event": "payment.success",
+  "data": {
+    "tx_id": "TX1234567890123",
+    "merchant_id": "MCH-ABCD1234",
+    "amount": 50347,
+    "fee_amount": 503,
+    "net_amount": 49844,
+    "status": "paid",
+    "paid_at": "2025-01-01T12:15:00",
+    "metadata": "{\"order_id\": \"ORD-123\"}"
+  },
+  "timestamp": 1704110100
+}
+```
 
+Headers yang dikirim:
+```
+Content-Type: application/json
+X-Webhook-Event: payment.success
+X-Webhook-Signature: hmac-sha256-signature
+X-Webhook-Timestamp: unix-timestamp
+```
+
+Verifikasi signature:
+```python
+import hmac, hashlib
+expected = hmac.new(
+    webhook_secret.encode(),
+    request_body.encode(),
+    hashlib.sha256
+).hexdigest()
+assert expected == request.headers["X-Webhook-Signature"]
+```
+
+## Bot Commands
+
+### User
 | Command | Keterangan |
 |---------|-----------|
 | `/start` | Mulai bot |
-| `/bayar [nominal] [keterangan]` | Buat pembayaran baru |
-| `/cek [TX_ID]` | Cek status transaksi |
-| `/riwayat` | Lihat riwayat transaksi |
-| `/batal [TX_ID]` | Batalkan transaksi pending |
-| `/help` | Panduan penggunaan |
+| `/bayar [nominal] [ket]` | Buat pembayaran |
+| `/cek [TX_ID]` | Cek status |
+| `/riwayat` | Riwayat transaksi |
+| `/batal [TX_ID]` | Batalkan pembayaran |
 
-### Admin Commands
-
+### Admin - Payment
 | Command | Keterangan |
 |---------|-----------|
-| `/confirm [nominal]` | Konfirmasi pembayaran (cocokkan nominal) |
-| `/stats` | Lihat statistik transaksi |
-| `/pending` | Lihat semua transaksi pending |
+| `/confirm [nominal]` | Konfirmasi pembayaran |
+| `/stats` | Statistik |
+| `/pending` | Lihat transaksi pending |
 
-## Alur Konfirmasi Pembayaran
+### Admin - Merchant
+| Command | Keterangan |
+|---------|-----------|
+| `/addmerchant [nama] [webhook] [fee%]` | Daftarkan merchant |
+| `/merchants` | Lihat semua merchant |
+| `/merchantinfo [ID]` | Detail merchant |
+| `/revokekey [ID]` | Revoke API key |
+| `/setfee [ID] [percent]` | Ubah fee |
+| `/deactivate [ID]` | Nonaktifkan merchant |
+| `/activate [ID]` | Aktifkan merchant |
+| `/gatewaystats` | Statistik gateway |
 
-### Mode Manual (Default)
+## Alur Merchant (Bot Lain Pakai Gateway Ini)
 
-1. User bayar via QRIS
-2. Admin cek mutasi di aplikasi Mitra Bukalapak
-3. Admin lihat ada pembayaran masuk, misal Rp 50.347
-4. Admin ketik `/confirm 50347` di bot
-5. Bot otomatis cocokkan dengan transaksi pending
-6. User dapat notifikasi pembayaran berhasil
+```
+1. Admin daftarkan merchant:
+   /addmerchant BotPulsaXYZ https://botxyz.com/webhook 1.5
 
-### Mode Otomatis (Advanced)
+2. Merchant dapat API Key:
+   PAY-a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
 
-Untuk mode full-otomatis, Anda bisa mengintegrasikan layanan cek mutasi seperti:
+3. Bot merchant panggil API:
+   POST /api/v1/payment/create
+   → Dapat QR image (base64) + tx_id
 
-- **Mutasiku** (https://mutasiku.id) - API cek mutasi GoPay/DANA
-- **Moota** (https://moota.co) - API cek mutasi bank
-- Custom scraping (tidak disarankan)
+4. Bot merchant tampilkan QR ke customer
 
-Edit file `payment_manager.py`, pada method `_fetch_mutations()` di class `MutationChecker`.
+5. Customer scan & bayar
+
+6. Admin /confirm → Gateway kirim webhook ke merchant
+
+7. Bot merchant terima webhook → proses order
+```
 
 ## Struktur File
 
 ```
-qris-telegram-bot/
-├── bot.py              # Main bot (entry point)
-├── qris_converter.py   # Konversi QRIS statis ke dinamis
-├── payment_manager.py  # Manajemen transaksi & mutasi
-├── requirements.txt    # Python dependencies
-├── .env.example        # Template konfigurasi
-├── .gitignore          # Git ignore rules
-└── README.md           # Dokumentasi (file ini)
+pay/
+├── bot.py               ← Main (Bot + API launcher)
+├── api_server.py        ← REST API (FastAPI)
+├── qris_converter.py    ← QRIS statis → dinamis
+├── payment_manager.py   ← Transaksi & mutasi
+├── merchant_manager.py  ← Merchant & API key
+├── webhook_sender.py    ← Webhook ke merchant
+├── requirements.txt     ← Dependencies
+├── .env                 ← Konfigurasi (private)
+├── .env.example         ← Template konfigurasi
+├── .gitignore           ← Ignore rules
+└── README.md            ← Dokumentasi (file ini)
 ```
 
-## Deploy ke VPS/Server
+## Deploy
 
-### Menggunakan systemd (Linux)
-
-1. Copy project ke server
-2. Install dependencies
-3. Buat service file:
-
-```bash
-sudo nano /etc/systemd/system/qris-bot.service
-```
+### Systemd (VPS Linux)
 
 ```ini
 [Unit]
-Description=QRIS Telegram Bot
+Description=QRIS Payment Gateway
 After=network.target
 
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/home/ubuntu/qris-telegram-bot
-Environment=PATH=/home/ubuntu/qris-telegram-bot/venv/bin
-ExecStart=/home/ubuntu/qris-telegram-bot/venv/bin/python bot.py
+WorkingDirectory=/home/ubuntu/pay
+ExecStart=/home/ubuntu/pay/venv/bin/python bot.py
 Restart=always
 RestartSec=10
 
@@ -200,21 +272,7 @@ RestartSec=10
 WantedBy=multi-user.target
 ```
 
-4. Aktifkan service:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable qris-bot
-sudo systemctl start qris-bot
-```
-
-5. Cek status:
-
-```bash
-sudo systemctl status qris-bot
-```
-
-### Menggunakan Docker (Opsional)
+### Docker
 
 ```dockerfile
 FROM python:3.11-slim
@@ -222,35 +280,15 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
+EXPOSE 8000
 CMD ["python", "bot.py"]
 ```
 
 ```bash
-docker build -t qris-bot .
-docker run -d --name qris-bot --env-file .env qris-bot
+docker build -t qris-gateway .
+docker run -d --name qris-gateway -p 8000:8000 --env-file .env qris-gateway
 ```
-
-## FAQ
-
-**Q: Kenapa nominalnya ada angka unik (misal 50.347 bukan 50.000)?**  
-A: Angka unik digunakan untuk mengidentifikasi pembayaran. Karena QRIS Mitra Bukalapak tidak punya webhook/callback, kita perlu cara untuk mencocokkan pembayaran yang masuk dengan transaksi di bot.
-
-**Q: Bagaimana kalau 2 user bayar nominal yang sama?**  
-A: Bot otomatis generate angka unik yang berbeda untuk setiap transaksi, jadi tidak akan bentrok.
-
-**Q: Apakah aman?**  
-A: Data QRIS dan token bot disimpan di file `.env` lokal (tidak di-commit ke git). Database transaksi tersimpan lokal di SQLite.
-
-**Q: Bisa pakai QRIS selain Mitra Bukalapak?**  
-A: Ya! Bisa pakai QRIS statis dari provider manapun (GoPay Merchant, DANA Merchant, OVO, dll). Yang penting copy data string dari QR Code-nya.
-
-**Q: Apakah bisa full otomatis tanpa admin /confirm?**  
-A: Bisa, dengan mengintegrasikan API cek mutasi. Lihat bagian "Mode Otomatis" di atas.
 
 ## Lisensi
 
-MIT License - Bebas digunakan dan dimodifikasi.
-
-## Disclaimer
-
-Bot ini menggunakan metode konversi QRIS statis ke dinamis yang merupakan teknik umum. Pastikan penggunaan sesuai dengan ketentuan layanan Mitra Bukalapak dan regulasi Bank Indonesia terkait QRIS.
+MIT License
