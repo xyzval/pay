@@ -102,19 +102,20 @@ def extract_amount_from_text(text: str) -> Optional[int]:
 
 async def auto_confirm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Tangkap pesan dari MacroDroid (dikirim sebagai admin).
-    MacroDroid kirim teks notifikasi Mitra Bukalapak langsung ke bot.
+    Tangkap pesan dari MacroDroid.
+    MacroDroid kirim teks notifikasi via Bot API sendMessage ke chat admin.
     Bot parse nominal → auto match → auto confirm.
     """
     global payment_manager, mutation_checker
 
-    # Hanya proses pesan dari ADMIN (MacroDroid kirim sebagai admin)
-    if not is_admin(update.effective_user.id):
+    # Hanya proses pesan di chat admin (private chat dengan admin)
+    chat_id = update.effective_chat.id
+    if chat_id not in ADMIN_IDS:
         return
 
     text = update.message.text or ""
 
-    # Skip jika ini command biasa (bukan dari MacroDroid)
+    # Skip command
     if text.startswith("/"):
         return
 
@@ -432,9 +433,10 @@ def main():
     # Callbacks (inline buttons)
     application.add_handler(CallbackQueryHandler(callback_handler))
 
-    # AUTO-CONFIRM: Tangkap semua pesan teks dari admin (MacroDroid)
+    # AUTO-CONFIRM: Tangkap SEMUA pesan teks non-command di chat admin
+    # Ini menangkap pesan dari MacroDroid (via Bot API sendMessage)
     application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.User(user_id=ADMIN_IDS),
+        filters.TEXT & ~filters.COMMAND,
         auto_confirm_handler
     ))
 
