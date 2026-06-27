@@ -216,8 +216,8 @@ async def bayar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     amount = int(args[0])
     product_name = " ".join(args[1:]) if len(args) > 1 else ""
-    if amount < 1000:
-        await update.message.reply_text("\u274c Minimal Rp 1.000")
+    if amount < 100:
+        await update.message.reply_text("\u274c Minimal Rp 100")
         return
     if amount > 10000000:
         await update.message.reply_text("\u274c Maksimal Rp 10.000.000")
