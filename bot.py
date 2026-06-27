@@ -1,7 +1,7 @@
 """
 Telegram Bot - QRIS Payment (Auto-Confirm via MacroDroid)
 Bot menerima pembayaran via QRIS Mitra Bukalapak.
-Auto-confirm menggunakan MacroDroid di HP Android.
+Auto-confirm: MacroDroid kirim notifikasi langsung ke bot via Telegram API.
 
 User Commands:
   /start   - Mulai bot
@@ -18,10 +18,10 @@ Admin Commands:
 """
 
 import os
+import re
 import logging
-import threading
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Optional
 
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -29,7 +29,9 @@ from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
     ContextTypes,
+    filters,
 )
 
 from qris_converter import static_to_dynamic, generate_qr_image
@@ -44,7 +46,6 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 QRIS_STATIC = os.getenv("QRIS_STATIC", "")
 EXPIRY_MINUTES = int(os.getenv("EXPIRY_MINUTES", "30"))
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "15"))
-API_PORT = int(os.getenv("API_PORT", "8000"))
 
 # Logging
 logging.basicConfig(
@@ -72,6 +73,91 @@ def format_transaction(tx: Dict) -> str:
     if tx["status"] == "paid" and tx.get("paid_at"):
         text += f"\n   Dibayar: {tx['paid_at'][:16]}"
     return text
+
+
+def extract_amount_from_text(text: str) -> Optional[int]:
+    """Extract nominal Rupiah dari teks notifikasi Mitra Bukalapak."""
+    patterns = [
+        r'[Rr]p\.?\s*([0-9][0-9.,]*)',
+        r'sebesar\s*[Rr]p\.?\s*([0-9][0-9.,]*)',
+        r'(\d{1,3}(?:[.,]\d{3})+)',
+        r'(\d{4,})',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            amount_str = match.group(1).replace(".", "").replace(",", "")
+            try:
+                amount = int(amount_str)
+                if 1000 <= amount <= 100000000:
+                    return amount
+            except ValueError:
+                continue
+    return None
+
+
+# ========================
+# AUTO-CONFIRM (dari MacroDroid)
+# ========================
+
+async def auto_confirm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Tangkap pesan dari MacroDroid (dikirim sebagai admin).
+    MacroDroid kirim teks notifikasi Mitra Bukalapak langsung ke bot.
+    Bot parse nominal → auto match → auto confirm.
+    """
+    global payment_manager, mutation_checker
+
+    # Hanya proses pesan dari ADMIN (MacroDroid kirim sebagai admin)
+    if not is_admin(update.effective_user.id):
+        return
+
+    text = update.message.text or ""
+
+    # Skip jika ini command biasa (bukan dari MacroDroid)
+    if text.startswith("/"):
+        return
+
+    # Extract nominal dari teks notifikasi
+    amount = extract_amount_from_text(text)
+
+    if not amount:
+        # Bukan notifikasi pembayaran, abaikan
+        return
+
+    # Coba match dengan pending transaction
+    matched_tx = await mutation_checker.manual_confirm(amount, "MacroDroid Auto")
+
+    if matched_tx:
+        logger.info(f"AUTO-CONFIRM: {matched_tx['tx_id']} = Rp {amount:,}")
+
+        # Notif ke admin
+        await update.message.reply_text(
+            f"\u2705 <b>Auto-Confirmed!</b>\n\n"
+            f"TX: <code>{matched_tx['tx_id']}</code>\n"
+            f"Nominal: {format_rupiah(matched_tx['total_amount'])}\n"
+            f"Produk: {matched_tx['product_name'] or '-'}",
+            parse_mode="HTML"
+        )
+
+        # Notif ke buyer
+        try:
+            if matched_tx.get("chat_id") and matched_tx["chat_id"] != 0:
+                await context.bot.send_message(
+                    chat_id=matched_tx["chat_id"],
+                    text=(
+                        f"\u2705 <b>Pembayaran Berhasil!</b>\n\n"
+                        f"Transaksi <code>{matched_tx['tx_id']}</code> dikonfirmasi.\n"
+                        f"Nominal: {format_rupiah(matched_tx['total_amount'])}\n\n"
+                        f"Terima kasih! \U0001f64f"
+                    ),
+                    parse_mode="HTML"
+                )
+        except Exception as e:
+            logger.error(f"Failed to notify buyer: {e}")
+    else:
+        # Ada nominal tapi tidak cocok dengan pending manapun
+        logger.info(f"MacroDroid: Rp {amount:,} - no match")
 
 
 # ========================
@@ -230,7 +316,7 @@ async def batal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         tx_id = args[0].upper()
     ok = await payment_manager.cancel_transaction(tx_id, user_id)
-    await update.message.reply_text(f"\U0001f6ab Dibatalkan." if ok else "\u274c Gagal.", parse_mode="HTML")
+    await update.message.reply_text(f"\U0001f6ab Dibatalkan." if ok else "\u274c Gagal.")
 
 
 # ========================
@@ -238,7 +324,7 @@ async def batal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========================
 
 async def confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manual confirm (backup jika MacroDroid gagal)."""
+    """Manual confirm (backup)."""
     if not is_admin(update.effective_user.id):
         return
     args = context.args
@@ -257,13 +343,14 @@ async def confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     amount = int(args[0])
     matched = await mutation_checker.manual_confirm(amount)
     if matched:
-        await update.message.reply_text(f"\u2705 Confirmed! {matched['tx_id']}", parse_mode="HTML")
+        await update.message.reply_text(f"\u2705 Confirmed! {matched['tx_id']}")
         try:
-            await context.bot.send_message(
-                chat_id=matched["chat_id"],
-                text=f"\u2705 <b>Pembayaran Berhasil!</b>\n\n<code>{matched['tx_id']}</code>\n{format_rupiah(matched['total_amount'])}\n\nTerima kasih! \U0001f64f",
-                parse_mode="HTML"
-            )
+            if matched.get("chat_id") and matched["chat_id"] != 0:
+                await context.bot.send_message(
+                    chat_id=matched["chat_id"],
+                    text=f"\u2705 <b>Pembayaran Berhasil!</b>\n\n<code>{matched['tx_id']}</code>\n{format_rupiah(matched['total_amount'])}\n\nTerima kasih! \U0001f64f",
+                    parse_mode="HTML"
+                )
         except:
             pass
     else:
@@ -304,36 +391,8 @@ async def post_init(application: Application):
     await payment_manager.initialize()
 
     mutation_checker = MutationChecker(payment_manager=payment_manager, check_interval=CHECK_INTERVAL)
-
-    async def on_paid(tx: Dict):
-        try:
-            if tx.get("chat_id") and tx["chat_id"] != 0:
-                await application.bot.send_message(
-                    chat_id=tx["chat_id"],
-                    text=f"\u2705 <b>Pembayaran Berhasil!</b>\n\n<code>{tx['tx_id']}</code>\n{format_rupiah(tx['total_amount'])}\n\nTerima kasih! \U0001f64f",
-                    parse_mode="HTML"
-                )
-            for aid in ADMIN_IDS:
-                await application.bot.send_message(chat_id=aid, text=f"\U0001f4b0 PAID: {tx['tx_id']} | {format_rupiah(tx['total_amount'])}", parse_mode="HTML")
-        except Exception as e:
-            logger.error(f"Notify error: {e}")
-
-    mutation_checker.set_payment_callback(on_paid)
     await mutation_checker.start()
 
-    # Setup MacroDroid server
-    import macrodroid_server
-    macrodroid_server.payment_manager = payment_manager
-    macrodroid_server.on_payment_confirmed = on_paid
-
-    # Start API server in background
-    def run_server():
-        import uvicorn
-        uvicorn.run(macrodroid_server.app, host="0.0.0.0", port=API_PORT, log_level="info")
-
-    thread = threading.Thread(target=run_server, daemon=True)
-    thread.start()
-    logger.info(f"MacroDroid webhook server started on port {API_PORT}")
     logger.info("Bot ready! Auto-confirm via MacroDroid active.")
 
 
@@ -357,21 +416,33 @@ def main():
         .build()
     )
 
+    # User commands
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("bayar", bayar_command))
     application.add_handler(CommandHandler("cek", cek_command))
     application.add_handler(CommandHandler("riwayat", riwayat_command))
     application.add_handler(CommandHandler("batal", batal_command))
+
+    # Admin commands
     application.add_handler(CommandHandler("confirm", confirm_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("pending", pending_command))
+
+    # Callbacks (inline buttons)
     application.add_handler(CallbackQueryHandler(callback_handler))
 
+    # AUTO-CONFIRM: Tangkap semua pesan teks dari admin (MacroDroid)
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.User(user_id=ADMIN_IDS),
+        auto_confirm_handler
+    ))
+
     print("\U0001f916 Bot started! (Auto-confirm via MacroDroid)")
-    print(f"   Webhook: http://0.0.0.0:{API_PORT}/callback/notification")
     print(f"   QRIS: {'\u2705' if QRIS_STATIC else '\u274c'}")
     print(f"   Expiry: {EXPIRY_MINUTES} min")
+    print(f"   Admin: {ADMIN_IDS}")
+    print(f"   Mode: AUTO (MacroDroid → Telegram → Bot)")
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
