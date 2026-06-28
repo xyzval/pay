@@ -1,0 +1,69 @@
+# ============================================================
+# 🤖 QRIS Payment Gateway Bot - Systemd Service File
+# ============================================================
+# Bot Telegram + Payment API berjalan 24/7 non-stop.
+# Auto-restart jika crash. Auto-start saat server reboot.
+#
+# INSTALASI MANUAL (jika tidak pakai install.sh):
+#
+#   1. Edit file ini → sesuaikan User, WorkingDirectory, ExecStart
+#   2. Copy ke systemd:
+#      sudo cp pay-bot.service /etc/systemd/system/pay-bot.service
+#   3. Reload & aktifkan:
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable pay-bot
+#      sudo systemctl start pay-bot
+#   4. Cek status:
+#      sudo systemctl status pay-bot
+#      sudo journalctl -u pay-bot -f
+#
+# ============================================================
+
+[Unit]
+Description=QRIS Payment Gateway Bot (Telegram + API 24/7)
+Documentation=https://github.com/xyzval/pay
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# ─── SESUAIKAN INI ───
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/pay
+ExecStart=/home/ubuntu/pay/venv/bin/python /home/ubuntu/pay/bot.py
+# ─────────────────────
+
+# Auto restart jika crash/mati
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/ubuntu/pay/venv/bin:/usr/local/bin:/usr/bin
+
+# Timeout
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/pay
+PrivateTmp=true
+
+# Logging (lihat dengan: journalctl -u pay-bot -f)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pay-bot
+
+# Resource limits (optional, uncomment jika perlu)
+# MemoryMax=512M
+# CPUQuota=80%
+
+[Install]
+WantedBy=multi-user.target

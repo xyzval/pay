@@ -50,7 +50,38 @@ Dilengkapi REST API + API Key system agar bisa digunakan oleh bot/website lain s
 - Admin: merchant management (add, revoke, deactivate)
 - Notifikasi otomatis ke buyer & admin
 
-## Quick Start
+## 🚀 One-Click Install (Recommended)
+
+**Satu perintah, langsung jalan 24 jam non-stop!**
+
+```bash
+bash <(curl -s https://raw.githubusercontent.com/xyzval/pay/main/install.sh)
+```
+
+Script ini otomatis:
+- ✅ Install semua dependencies (Python, pip, git)
+- ✅ Clone repository
+- ✅ Setup virtual environment & install packages
+- ✅ Buat konfigurasi (akan ditanya BOT_TOKEN & ADMIN_IDS)
+- ✅ Setup systemd service → **hidup 24/7, auto-restart jika crash**
+- ✅ Auto-start saat server reboot
+
+> **Yang dibutuhkan:** VPS Linux (Ubuntu/Debian/CentOS) + BOT_TOKEN dari [@BotFather](https://t.me/BotFather)
+
+### Setelah Install
+
+| Perintah | Fungsi |
+|----------|--------|
+| `sudo systemctl status pay-bot` | Cek status bot |
+| `sudo journalctl -u pay-bot -f` | Lihat log realtime |
+| `sudo systemctl restart pay-bot` | Restart bot |
+| `sudo systemctl stop pay-bot` | Stop bot |
+| `nano ~/pay/.env` | Edit konfigurasi |
+| `cd ~/pay && git pull && sudo systemctl restart pay-bot` | Update bot |
+
+---
+
+## Quick Start (Manual)
 
 ```bash
 # 1. Clone repo
@@ -239,12 +270,11 @@ assert expected == request.headers["X-Webhook-Signature"]
 ```
 pay/
 ├── bot.py               ← Main (Bot + API launcher)
-├── api_server.py        ← REST API (FastAPI)
-├── qris_converter.py    ← QRIS statis → dinamis
+├── gateway_api.py       ← REST API (FastAPI)
 ├── payment_manager.py   ← Transaksi & mutasi
-├── merchant_manager.py  ← Merchant & API key
-├── webhook_sender.py    ← Webhook ke merchant
 ├── requirements.txt     ← Dependencies
+├── install.sh           ← 🚀 One-click installer
+├── pay-bot.service      ← Systemd service (24/7)
 ├── .env                 ← Konfigurasi (private)
 ├── .env.example         ← Template konfigurasi
 ├── .gitignore           ← Ignore rules
@@ -253,23 +283,31 @@ pay/
 
 ## Deploy
 
-### Systemd (VPS Linux)
+### 🚀 One-Click (Paling Mudah)
 
-```ini
-[Unit]
-Description=QRIS Payment Gateway
-After=network.target
+```bash
+bash <(curl -s https://raw.githubusercontent.com/xyzval/pay/main/install.sh)
+```
 
-[Service]
-Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/pay
-ExecStart=/home/ubuntu/pay/venv/bin/python bot.py
-Restart=always
-RestartSec=10
+### Systemd Manual (VPS Linux)
 
-[Install]
-WantedBy=multi-user.target
+File service sudah disediakan: `pay-bot.service`
+
+```bash
+# 1. Edit sesuaikan path & user
+nano pay-bot.service
+
+# 2. Copy ke systemd
+sudo cp pay-bot.service /etc/systemd/system/pay-bot.service
+
+# 3. Aktifkan
+sudo systemctl daemon-reload
+sudo systemctl enable pay-bot
+sudo systemctl start pay-bot
+
+# 4. Cek
+sudo systemctl status pay-bot
+sudo journalctl -u pay-bot -f
 ```
 
 ### Docker
@@ -286,7 +324,7 @@ CMD ["python", "bot.py"]
 
 ```bash
 docker build -t qris-gateway .
-docker run -d --name qris-gateway -p 8000:8000 --env-file .env qris-gateway
+docker run -d --name qris-gateway -p 8000:8000 --env-file .env --restart=always qris-gateway
 ```
 
 ## Lisensi
