@@ -1,7 +1,12 @@
 """
-Telegram Bot - QRIS Payment (Auto-Confirm via MacroDroid)
-Bot menerima pembayaran via QRIS Mitra Bukalapak.
-Auto-confirm: MacroDroid kirim notifikasi langsung ke bot via Telegram API.
+Telegram Bot - QRIS Payment via Saweria Webhook (Resmi)
+Auto-confirm pembayaran menggunakan webhook resmi dari Saweria.
+
+Flow:
+1. User /bayar → Bot kirim link Saweria + nominal unik
+2. Customer bayar di Saweria
+3. Saweria kirim webhook ke bot
+4. Bot auto-match & confirm
 
 User Commands:
   /start   - Mulai bot
@@ -20,6 +25,7 @@ Admin Commands:
 import os
 import re
 import logging
+import threading
 from datetime import datetime
 from typing import Dict, Optional
 
@@ -34,7 +40,6 @@ from telegram.ext import (
     filters,
 )
 
-from qris_converter import static_to_dynamic, generate_qr_image
 from payment_manager import PaymentManager, MutationChecker
 
 # Load environment variables
@@ -43,9 +48,10 @@ load_dotenv()
 # Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
-QRIS_STATIC = os.getenv("QRIS_STATIC", "")
+SAWERIA_USERNAME = os.getenv("SAWERIA_USERNAME", "nvatryn")
 EXPIRY_MINUTES = int(os.getenv("EXPIRY_MINUTES", "30"))
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "15"))
+API_PORT = int(os.getenv("API_PORT", "8000"))
 
 # Logging
 logging.basicConfig(
@@ -75,92 +81,6 @@ def format_transaction(tx: Dict) -> str:
     return text
 
 
-def extract_amount_from_text(text: str) -> Optional[int]:
-    """Extract nominal Rupiah dari teks notifikasi Mitra Bukalapak."""
-    patterns = [
-        r'[Rr]p\.?\s*([0-9][0-9.,]*)',
-        r'sebesar\s*[Rr]p\.?\s*([0-9][0-9.,]*)',
-        r'(\d{1,3}(?:[.,]\d{3})+)',
-        r'(\d{4,})',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            amount_str = match.group(1).replace(".", "").replace(",", "")
-            try:
-                amount = int(amount_str)
-                if 1000 <= amount <= 100000000:
-                    return amount
-            except ValueError:
-                continue
-    return None
-
-
-# ========================
-# AUTO-CONFIRM (dari MacroDroid)
-# ========================
-
-async def auto_confirm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Tangkap pesan dari MacroDroid.
-    MacroDroid kirim teks notifikasi via Bot API sendMessage ke chat admin.
-    Bot parse nominal → auto match → auto confirm.
-    """
-    global payment_manager, mutation_checker
-
-    # Hanya proses pesan di chat admin (private chat dengan admin)
-    chat_id = update.effective_chat.id
-    if chat_id not in ADMIN_IDS:
-        return
-
-    text = update.message.text or ""
-
-    # Skip command
-    if text.startswith("/"):
-        return
-
-    # Extract nominal dari teks notifikasi
-    amount = extract_amount_from_text(text)
-
-    if not amount:
-        # Bukan notifikasi pembayaran, abaikan
-        return
-
-    # Coba match dengan pending transaction
-    matched_tx = await mutation_checker.manual_confirm(amount, "MacroDroid Auto")
-
-    if matched_tx:
-        logger.info(f"AUTO-CONFIRM: {matched_tx['tx_id']} = Rp {amount:,}")
-
-        # Notif ke admin
-        await update.message.reply_text(
-            f"\u2705 <b>Auto-Confirmed!</b>\n\n"
-            f"TX: <code>{matched_tx['tx_id']}</code>\n"
-            f"Nominal: {format_rupiah(matched_tx['total_amount'])}\n"
-            f"Produk: {matched_tx['product_name'] or '-'}",
-            parse_mode="HTML"
-        )
-
-        # Notif ke buyer
-        try:
-            if matched_tx.get("chat_id") and matched_tx["chat_id"] != 0:
-                await context.bot.send_message(
-                    chat_id=matched_tx["chat_id"],
-                    text=(
-                        f"\u2705 <b>Pembayaran Berhasil!</b>\n\n"
-                        f"Transaksi <code>{matched_tx['tx_id']}</code> dikonfirmasi.\n"
-                        f"Nominal: {format_rupiah(matched_tx['total_amount'])}\n\n"
-                        f"Terima kasih! \U0001f64f"
-                    ),
-                    parse_mode="HTML"
-                )
-        except Exception as e:
-            logger.error(f"Failed to notify buyer: {e}")
-    else:
-        # Ada nominal tapi tidak cocok dengan pending manapun
-        logger.info(f"MacroDroid: Rp {amount:,} - no match")
-
-
 # ========================
 # USER COMMANDS
 # ========================
@@ -169,7 +89,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await update.message.reply_text(
         f"\U0001f44b Halo <b>{user.first_name}</b>!\n\n"
-        f"Bot Pembayaran QRIS Otomatis.\n\n"
+        f"Bot Pembayaran Otomatis via QRIS.\n\n"
         f"\U0001f4cb <b>Menu:</b>\n"
         f"/bayar - Buat pembayaran\n"
         f"/cek - Cek status\n"
@@ -185,11 +105,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "\u2139\ufe0f <b>Cara Bayar:</b>\n\n"
         "1. Ketik /bayar [nominal] [keterangan]\n"
-        "2. Scan QRIS yang dikirim bot\n"
-        "3. Bayar TEPAT sesuai nominal\n"
+        "2. Buka link pembayaran yang dikirim bot\n"
+        "3. Bayar via QRIS/transfer di halaman Saweria\n"
         "4. Pembayaran dikonfirmasi otomatis!\n\n"
-        f"\u26a0\ufe0f Expired: {EXPIRY_MINUTES} menit\n"
-        "\u26a0\ufe0f Jangan bulatkan nominal!",
+        f"\u26a0\ufe0f Expired: {EXPIRY_MINUTES} menit",
         parse_mode="HTML"
     )
 
@@ -227,14 +146,16 @@ async def bayar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _process_payment(update, context, user_id, chat_id, amount, product_name=""):
-    if not QRIS_STATIC:
-        await update.effective_message.reply_text("\u26a0\ufe0f Bot belum dikonfigurasi.")
-        return
     msg = await update.effective_message.reply_text("\u23f3 Memproses...")
     try:
-        tx = await payment_manager.create_transaction(user_id=user_id, chat_id=chat_id, base_amount=amount, product_name=product_name)
-        dynamic_qris = static_to_dynamic(QRIS_STATIC, tx["unique_amount"])
-        qr_buffer = generate_qr_image(dynamic_qris)
+        tx = await payment_manager.create_transaction(
+            user_id=user_id, chat_id=chat_id,
+            base_amount=amount, product_name=product_name
+        )
+
+        # Link Saweria dengan nominal unik
+        saweria_link = f"https://saweria.co/{SAWERIA_USERNAME}"
+
         text = (
             f"\U0001f9fe <b>Invoice Pembayaran</b>\n"
             f"{'\u2500' * 28}\n"
@@ -243,13 +164,24 @@ async def _process_payment(update, context, user_id, chat_id, amount, product_na
             f"\U0001f4b0 Harga: {format_rupiah(tx['base_amount'])}\n"
             f"\U0001f522 <b>BAYAR: {format_rupiah(tx['unique_amount'])}</b>\n"
             f"{'\u2500' * 28}\n\n"
-            f"\U0001f4f1 <b>Scan QRIS di atas</b>\n\n"
-            f"\u26a0\ufe0f Bayar TEPAT <b>{format_rupiah(tx['unique_amount'])}</b>\n"
+            f"\U0001f517 <b>Link Pembayaran:</b>\n"
+            f"{saweria_link}\n\n"
+            f"\u26a0\ufe0f <b>PENTING:</b>\n"
+            f"\u2022 Buka link di atas\n"
+            f"\u2022 Isi TEPAT <b>{format_rupiah(tx['unique_amount'])}</b>\n"
+            f"\u2022 Bayar via QRIS/Transfer\n"
+            f"\u2022 Otomatis terkonfirmasi!\n\n"
             f"\u23f0 Expired: {EXPIRY_MINUTES} menit"
         )
+
         await msg.delete()
-        await context.bot.send_photo(chat_id=chat_id, photo=qr_buffer, caption=text, parse_mode="HTML")
-        context.job_queue.run_once(_check_expiry, when=EXPIRY_MINUTES * 60, data={"tx_id": tx["tx_id"], "chat_id": chat_id}, name=f"exp_{tx['tx_id']}")
+        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+
+        context.job_queue.run_once(
+            _check_expiry, when=EXPIRY_MINUTES * 60,
+            data={"tx_id": tx["tx_id"], "chat_id": chat_id},
+            name=f"exp_{tx['tx_id']}"
+        )
     except Exception as e:
         logger.error(f"Payment error: {e}")
         await msg.edit_text(f"\u274c Error: {e}")
@@ -260,7 +192,11 @@ async def _check_expiry(context: ContextTypes.DEFAULT_TYPE):
     tx = await payment_manager.get_transaction(data["tx_id"])
     if tx and tx["status"] == "pending":
         await payment_manager.mark_expired_transactions()
-        await context.bot.send_message(chat_id=data["chat_id"], text=f"\u23f0 Transaksi <code>{data['tx_id']}</code> expired.\n/bayar untuk buat baru.", parse_mode="HTML")
+        await context.bot.send_message(
+            chat_id=data["chat_id"],
+            text=f"\u23f0 Transaksi <code>{data['tx_id']}</code> expired.\n/bayar untuk buat baru.",
+            parse_mode="HTML"
+        )
 
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -270,7 +206,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("pay_"):
         amount_str = data.replace("pay_", "")
         if amount_str == "custom":
-            await query.edit_message_text("\U0001f4b0 Ketik: <code>/bayar 75000 TopUp Game</code>", parse_mode="HTML")
+            await query.edit_message_text(
+                "\U0001f4b0 Ketik: <code>/bayar 75000 TopUp Game</code>",
+                parse_mode="HTML"
+            )
             return
         amount = int(amount_str)
         await query.edit_message_text(f"\u23f3 Memproses {format_rupiah(amount)}...")
@@ -317,7 +256,9 @@ async def batal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         tx_id = args[0].upper()
     ok = await payment_manager.cancel_transaction(tx_id, user_id)
-    await update.message.reply_text(f"\U0001f6ab Dibatalkan." if ok else "\u274c Gagal.")
+    await update.message.reply_text(
+        f"\U0001f6ab Dibatalkan." if ok else "\u274c Gagal."
+    )
 
 
 # ========================
@@ -392,9 +333,42 @@ async def post_init(application: Application):
     await payment_manager.initialize()
 
     mutation_checker = MutationChecker(payment_manager=payment_manager, check_interval=CHECK_INTERVAL)
+
+    # Callback saat pembayaran terkonfirmasi
+    async def on_paid(tx: Dict):
+        try:
+            if tx.get("chat_id") and tx["chat_id"] != 0:
+                await application.bot.send_message(
+                    chat_id=tx["chat_id"],
+                    text=f"\u2705 <b>Pembayaran Berhasil!</b>\n\n<code>{tx['tx_id']}</code>\n{format_rupiah(tx['total_amount'])}\n\nTerima kasih! \U0001f64f",
+                    parse_mode="HTML"
+                )
+            for aid in ADMIN_IDS:
+                await application.bot.send_message(
+                    chat_id=aid,
+                    text=f"\U0001f4b0 PAID: {tx['tx_id']} | {format_rupiah(tx['total_amount'])}",
+                    parse_mode="HTML"
+                )
+        except Exception as e:
+            logger.error(f"Notify error: {e}")
+
+    mutation_checker.set_payment_callback(on_paid)
     await mutation_checker.start()
 
-    logger.info("Bot ready! Auto-confirm via MacroDroid active.")
+    # Start Saweria webhook server
+    import saweria_webhook
+    saweria_webhook.payment_manager = payment_manager
+    saweria_webhook.on_payment_confirmed = on_paid
+
+    def run_server():
+        import uvicorn
+        uvicorn.run(saweria_webhook.app, host="0.0.0.0", port=API_PORT, log_level="info")
+
+    thread = threading.Thread(target=run_server, daemon=True)
+    thread.start()
+
+    logger.info(f"Saweria webhook server on port {API_PORT}")
+    logger.info("Bot ready!")
 
 
 async def post_shutdown(application: Application):
@@ -417,34 +391,21 @@ def main():
         .build()
     )
 
-    # User commands
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("bayar", bayar_command))
     application.add_handler(CommandHandler("cek", cek_command))
     application.add_handler(CommandHandler("riwayat", riwayat_command))
     application.add_handler(CommandHandler("batal", batal_command))
-
-    # Admin commands
     application.add_handler(CommandHandler("confirm", confirm_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("pending", pending_command))
-
-    # Callbacks (inline buttons)
     application.add_handler(CallbackQueryHandler(callback_handler))
 
-    # AUTO-CONFIRM: Tangkap SEMUA pesan teks non-command di chat admin
-    # Ini menangkap pesan dari MacroDroid (via Bot API sendMessage)
-    application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        auto_confirm_handler
-    ))
-
-    print("\U0001f916 Bot started! (Auto-confirm via MacroDroid)")
-    print(f"   QRIS: {'\u2705' if QRIS_STATIC else '\u274c'}")
+    print("\U0001f916 Bot started! (Saweria Webhook Auto-Confirm)")
+    print(f"   Saweria: https://saweria.co/{SAWERIA_USERNAME}")
+    print(f"   Webhook: http://0.0.0.0:{API_PORT}/callback/saweria")
     print(f"   Expiry: {EXPIRY_MINUTES} min")
-    print(f"   Admin: {ADMIN_IDS}")
-    print(f"   Mode: AUTO (MacroDroid → Telegram → Bot)")
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
