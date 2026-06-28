@@ -27,6 +27,8 @@ Admin Commands:
 
 import os
 import re
+import sys
+import asyncio
 import logging
 import subprocess
 import threading
@@ -326,6 +328,28 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="HTML")
 
 
+async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Restart bot tanpa update. Admin only."""
+    if not is_admin(update.effective_user.id):
+        return
+
+    await update.message.reply_text(
+        "─────────────────────────────\n"
+        "  🔄  <b>Merestart bot...</b>\n"
+        "─────────────────────────────",
+        parse_mode="HTML"
+    )
+
+    await asyncio.sleep(1)
+
+    bot_dir = os.path.dirname(os.path.abspath(__file__))
+    venv_python = os.path.join(bot_dir, "venv", "bin", "python")
+    python_exec = venv_python if os.path.exists(venv_python) else sys.executable
+    bot_script = os.path.join(bot_dir, "bot.py")
+
+    os.execv(python_exec, [python_exec, bot_script])
+
+
 async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Update bot dari GitHub & restart. Admin only."""
     if not is_admin(update.effective_user.id):
@@ -404,20 +428,18 @@ async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
 
-        # Restart via systemd (preferred) or os._exit as fallback
-        try:
-            restart_result = subprocess.run(
-                ["sudo", "systemctl", "restart", "pay-bot"],
-                capture_output=True, text=True, timeout=10
-            )
-            if restart_result.returncode != 0:
-                # Fallback: exit process (systemd will auto-restart)
-                logger.info("Systemctl restart failed, using exit fallback...")
-                os._exit(0)
-        except Exception:
-            # Fallback: exit and let systemd restart
-            logger.info("Restarting via exit (systemd auto-restart)...")
-            os._exit(0)
+        # Restart bot: replace current process with fresh one
+
+        # Give Telegram time to deliver the message
+        await asyncio.sleep(1)
+
+        # Determine python executable
+        venv_python = os.path.join(bot_dir, "venv", "bin", "python")
+        python_exec = venv_python if os.path.exists(venv_python) else sys.executable
+
+        # Method 1: os.execv - replaces current process entirely (works everywhere)
+        bot_script = os.path.join(bot_dir, "bot.py")
+        os.execv(python_exec, [python_exec, bot_script])
 
     except subprocess.TimeoutExpired:
         await msg.edit_text(
@@ -574,6 +596,7 @@ def main():
     application.add_handler(CommandHandler("addmerchant", addmerchant_command))
     application.add_handler(CommandHandler("merchants", merchants_command))
     application.add_handler(CommandHandler("update", update_command))
+    application.add_handler(CommandHandler("restart", restart_command))
     application.add_handler(CallbackQueryHandler(callback_handler))
 
     print("\U0001f916 Bot started! (Payment Gateway + Saweria Auto-Confirm)")
