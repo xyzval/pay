@@ -522,6 +522,47 @@ async def post_init(application: Application):
 
     mutation_checker = MutationChecker(payment_manager=payment_manager, check_interval=CHECK_INTERVAL)
 
+    # Set bot commands (menu bawah kiri Telegram)
+    from telegram import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat
+
+    # Commands untuk semua user
+    user_commands = [
+        BotCommand("start", "Mulai bot"),
+        BotCommand("bayar", "Buat pembayaran baru"),
+        BotCommand("cek", "Cek status pembayaran"),
+        BotCommand("riwayat", "Riwayat transaksi"),
+        BotCommand("batal", "Batalkan pembayaran"),
+        BotCommand("help", "Bantuan & cara bayar"),
+    ]
+    await application.bot.set_my_commands(user_commands)
+
+    # Commands tambahan untuk admin (per-user)
+    admin_commands = [
+        BotCommand("start", "Mulai bot"),
+        BotCommand("bayar", "Buat pembayaran baru"),
+        BotCommand("cek", "Cek status pembayaran"),
+        BotCommand("riwayat", "Riwayat transaksi"),
+        BotCommand("batal", "Batalkan pembayaran"),
+        BotCommand("help", "Bantuan & cara bayar"),
+        BotCommand("confirm", "Konfirmasi pembayaran manual"),
+        BotCommand("stats", "Statistik pembayaran"),
+        BotCommand("pending", "Lihat transaksi pending"),
+        BotCommand("addmerchant", "Daftarkan merchant baru"),
+        BotCommand("merchants", "Lihat daftar merchant"),
+        BotCommand("update", "Update bot dari GitHub & restart"),
+        BotCommand("restart", "Restart bot"),
+    ]
+    for admin_id in ADMIN_IDS:
+        try:
+            await application.bot.set_my_commands(
+                admin_commands,
+                scope=BotCommandScopeChat(chat_id=admin_id)
+            )
+        except Exception as e:
+            logger.warning(f"Failed to set admin commands for {admin_id}: {e}")
+
+    logger.info("Bot commands menu set!")
+
     # Callback saat pembayaran terkonfirmasi
     async def on_paid(tx: Dict):
         try:
