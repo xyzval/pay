@@ -22,11 +22,13 @@ Admin Commands:
   /pending - Lihat transaksi pending
   /addmerchant - Daftarkan merchant baru (dapat API Key)
   /merchants   - Lihat daftar merchant
+  /update  - Update bot dari GitHub & restart (24/7)
 """
 
 import os
 import re
 import logging
+import subprocess
 import threading
 from datetime import datetime
 from typing import Dict, Optional
@@ -324,6 +326,112 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="HTML")
 
 
+async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Update bot dari GitHub & restart. Admin only."""
+    if not is_admin(update.effective_user.id):
+        return
+
+    msg = await update.message.reply_text(
+        "⏳ <b>Mengupdate bot...</b>\n\n"
+        "🔄 Pulling dari GitHub...",
+        parse_mode="HTML"
+    )
+
+    try:
+        # Get current directory (where bot.py lives)
+        bot_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Git pull
+        result = subprocess.run(
+            ["git", "pull", "--rebase"],
+            capture_output=True, text=True, timeout=30,
+            cwd=bot_dir
+        )
+
+        if result.returncode != 0:
+            error_msg = result.stderr.strip() or result.stdout.strip()
+            await msg.edit_text(
+                f"❌ <b>Git Pull Gagal!</b>\n\n"
+                f"<code>{error_msg[:500]}</code>",
+                parse_mode="HTML"
+            )
+            return
+
+        git_output = result.stdout.strip()
+
+        # Check if already up to date
+        if "Already up to date" in git_output or "Already up-to-date" in git_output:
+            await msg.edit_text(
+                "✅ <b>Sudah versi terbaru!</b>\n\n"
+                "Tidak ada update baru dari repository.",
+                parse_mode="HTML"
+            )
+            return
+
+        # Get short diff stat
+        diff_result = subprocess.run(
+            ["git", "diff", "--stat", "HEAD~1", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+            cwd=bot_dir
+        )
+        diff_stat = diff_result.stdout.strip() if diff_result.returncode == 0 else git_output
+
+        # Install any new requirements
+        pip_msg = ""
+        venv_pip = os.path.join(bot_dir, "venv", "bin", "pip")
+        pip_cmd = venv_pip if os.path.exists(venv_pip) else "pip3"
+
+        req_file = os.path.join(bot_dir, "requirements.txt")
+        if os.path.exists(req_file):
+            pip_result = subprocess.run(
+                [pip_cmd, "install", "-q", "-r", req_file],
+                capture_output=True, text=True, timeout=60,
+                cwd=bot_dir
+            )
+            if pip_result.returncode == 0:
+                pip_msg = "\n📦 Dependencies updated!"
+
+        # Send success message
+        await msg.edit_text(
+            f"─────────────────────────────\n"
+            f"  🔄  <b>Update Berhasil!</b>\n"
+            f"─────────────────────────────\n\n"
+            f"<code>{diff_stat[:800]}</code>\n"
+            f"{pip_msg}\n"
+            f"─────────────────────────────\n"
+            f"  ⏳ <b>Merestart bot...</b>\n"
+            f"─────────────────────────────",
+            parse_mode="HTML"
+        )
+
+        # Restart via systemd (preferred) or os._exit as fallback
+        try:
+            restart_result = subprocess.run(
+                ["sudo", "systemctl", "restart", "pay-bot"],
+                capture_output=True, text=True, timeout=10
+            )
+            if restart_result.returncode != 0:
+                # Fallback: exit process (systemd will auto-restart)
+                logger.info("Systemctl restart failed, using exit fallback...")
+                os._exit(0)
+        except Exception:
+            # Fallback: exit and let systemd restart
+            logger.info("Restarting via exit (systemd auto-restart)...")
+            os._exit(0)
+
+    except subprocess.TimeoutExpired:
+        await msg.edit_text(
+            "❌ <b>Timeout!</b>\n\nProses update terlalu lama.",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Update error: {e}")
+        await msg.edit_text(
+            f"❌ <b>Update Gagal!</b>\n\n<code>{str(e)[:300]}</code>",
+            parse_mode="HTML"
+        )
+
+
 async def addmerchant_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Daftarkan merchant baru. Usage: /addmerchant [nama] [callback_url]"""
     if not is_admin(update.effective_user.id):
@@ -465,6 +573,7 @@ def main():
     application.add_handler(CommandHandler("pending", pending_command))
     application.add_handler(CommandHandler("addmerchant", addmerchant_command))
     application.add_handler(CommandHandler("merchants", merchants_command))
+    application.add_handler(CommandHandler("update", update_command))
     application.add_handler(CallbackQueryHandler(callback_handler))
 
     print("\U0001f916 Bot started! (Payment Gateway + Saweria Auto-Confirm)")
