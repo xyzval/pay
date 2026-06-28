@@ -20,6 +20,8 @@ Admin Commands:
   /confirm - Konfirmasi manual (backup)
   /stats   - Statistik
   /pending - Lihat transaksi pending
+  /addmerchant - Daftarkan merchant baru (dapat API Key)
+  /merchants   - Lihat daftar merchant
 """
 
 import os
@@ -322,6 +324,62 @@ async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="HTML")
 
 
+async def addmerchant_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Daftarkan merchant baru. Usage: /addmerchant [nama] [callback_url]"""
+    if not is_admin(update.effective_user.id):
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "\U0001f4dd <b>Daftarkan Merchant:</b>\n\n"
+            "<code>/addmerchant NamaToko https://callback.url</code>\n\n"
+            "Callback URL opsional (isi - jika skip)",
+            parse_mode="HTML"
+        )
+        return
+
+    import gateway_api
+    name = args[0].replace("_", " ")
+    callback = args[1] if len(args) > 1 and args[1] != "-" else ""
+    merchant = await gateway_api.create_merchant(name, callback)
+
+    await update.message.reply_text(
+        f"\u2705 <b>Merchant Terdaftar!</b>\n\n"
+        f"\U0001f3e2 Nama: {merchant['name']}\n"
+        f"\U0001f194 ID: <code>{merchant['merchant_id']}</code>\n"
+        f"\U0001f511 API Key: <code>{merchant['api_key']}</code>\n"
+        f"\U0001f517 Callback: {merchant['callback_url'] or '-'}\n\n"
+        f"\u26a0\ufe0f <b>SIMPAN API KEY! Hanya muncul sekali.</b>\n\n"
+        f"<b>Contoh pakai API:</b>\n"
+        f"<code>curl -X POST http://SERVER:{API_PORT}/api/create-payment \\\n"
+        f"  -H \"Authorization: Bearer {merchant['api_key']}\" \\\n"
+        f"  -H \"Content-Type: application/json\" \\\n"
+        f"  -d '{{\"amount\": 50000, \"product_name\": \"Pulsa\"}}'</code>",
+        parse_mode="HTML"
+    )
+
+
+async def merchants_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List merchants."""
+    if not is_admin(update.effective_user.id):
+        return
+    import gateway_api
+    async with gateway_api.db.execute("SELECT * FROM merchants ORDER BY created_at DESC") as c:
+        rows = await c.fetchall()
+        cols = [d[0] for d in c.description]
+        merchants = [dict(zip(cols, r)) for r in rows]
+
+    if not merchants:
+        await update.message.reply_text("\U0001f4ed Belum ada merchant.")
+        return
+
+    text = f"\U0001f3e2 <b>Merchants ({len(merchants)}):</b>\n\n"
+    for m in merchants[:20]:
+        status = "\u2705" if m["is_active"] else "\u274c"
+        text += f"{status} <b>{m['name']}</b> | <code>{m['merchant_id']}</code>\n"
+    await update.message.reply_text(text, parse_mode="HTML")
+
+
 # ========================
 # STARTUP
 # ========================
@@ -355,19 +413,24 @@ async def post_init(application: Application):
     mutation_checker.set_payment_callback(on_paid)
     await mutation_checker.start()
 
-    # Start Saweria webhook server
-    import saweria_webhook
-    saweria_webhook.payment_manager = payment_manager
-    saweria_webhook.on_payment_confirmed = on_paid
+    # Start Gateway API server (Saweria webhook + Merchant API)
+    import gateway_api
+    gateway_api.payment_manager = payment_manager
+    gateway_api.on_payment_confirmed = on_paid
+    gateway_api.SAWERIA_USERNAME = SAWERIA_USERNAME
+    gateway_api.db = payment_manager._db
+
+    # Init merchant tables
+    await gateway_api.init_merchant_db()
 
     def run_server():
         import uvicorn
-        uvicorn.run(saweria_webhook.app, host="0.0.0.0", port=API_PORT, log_level="info")
+        uvicorn.run(gateway_api.app, host="0.0.0.0", port=API_PORT, log_level="info")
 
     thread = threading.Thread(target=run_server, daemon=True)
     thread.start()
 
-    logger.info(f"Saweria webhook server on port {API_PORT}")
+    logger.info(f"Payment Gateway API on port {API_PORT}")
     logger.info("Bot ready!")
 
 
@@ -400,10 +463,13 @@ def main():
     application.add_handler(CommandHandler("confirm", confirm_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("pending", pending_command))
+    application.add_handler(CommandHandler("addmerchant", addmerchant_command))
+    application.add_handler(CommandHandler("merchants", merchants_command))
     application.add_handler(CallbackQueryHandler(callback_handler))
 
-    print("\U0001f916 Bot started! (Saweria Webhook Auto-Confirm)")
+    print("\U0001f916 Bot started! (Payment Gateway + Saweria Auto-Confirm)")
     print(f"   Saweria: https://saweria.co/{SAWERIA_USERNAME}")
+    print(f"   API Docs: http://0.0.0.0:{API_PORT}/docs")
     print(f"   Webhook: http://0.0.0.0:{API_PORT}/callback/saweria")
     print(f"   Expiry: {EXPIRY_MINUTES} min")
 
